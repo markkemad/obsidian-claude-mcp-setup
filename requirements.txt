@@ -1,0 +1,6 @@
+# Optional: Install this if you're behind a corporate proxy or firewall
+# that uses TLS inspection. It fixes certificate verification errors by
+# using your operating system's native certificate store.
+#
+# pip install truststore
+truststore>=0.8.0 ; sys_platform != 'darwin'
