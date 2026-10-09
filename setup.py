@@ -318,12 +318,52 @@ def choose_endpoint(data: dict) -> str:
     return f"https://127.0.0.1:{https_port}/mcp/"
 
 
+def probe_mcp(url: str, api_key: str, timeout=5) -> bool:
+    """True if the MCP endpoint answers an `initialize` request with HTTP 200.
+    Certificate checks are skipped: this only ever talks to the plugin's
+    self-signed loopback server."""
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                   "clientInfo": {"name": "obsidian-mcp-setup", "version": "1"}},
+    }).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    })
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def wait_for_server(url: str, api_key: str, seconds=60) -> bool:
+    print(f"\nWaiting up to {seconds}s for the MCP server at {url} ...")
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if probe_mcp(url, api_key):
+            print("  -> server is up and the API key is accepted.")
+            return True
+        time.sleep(2)
+    print("  -> no response. Obsidian must be running with the vault open and the")
+    print("     plugin enabled, or the connector will show 'Failed to connect'.")
+    return False
+
+
 def register_with_claude(url: str, api_key: str, server_name: str):
     manual_cmd = (
         f'claude mcp add --transport http {server_name} {url} '
         f'--header "Authorization: Bearer {api_key}"'
     )
-    if not shutil.which("claude"):
+    # Resolve the full path: on Windows `claude` is usually a .cmd shim
+    # (npm/nvm), which subprocess can't find by bare name.
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
         print("\n'claude' CLI not found on PATH. Install Claude Code, then run:")
         print(f"  {manual_cmd}")
         return
@@ -336,8 +376,13 @@ def register_with_claude(url: str, api_key: str, server_name: str):
     idx = prompt_choice("\nMCP scope #: ", scope_labels)
     scope = ["user", "local", "project"][idx]
 
+    # Make re-runs idempotent: drop any earlier registration of this name
+    # (e.g. a stale key or URL) so `add` doesn't fail with "already exists".
+    subprocess.run([claude_bin, "mcp", "remove", "--scope", scope, server_name],
+                   capture_output=True, text=True)
+
     cmd = [
-        "claude", "mcp", "add", "--transport", "http", "--scope", scope,
+        claude_bin, "mcp", "add", "--transport", "http", "--scope", scope,
         server_name, url, "--header", f"Authorization: Bearer {api_key}",
     ]
     print("\nRunning: claude mcp add --transport http --scope", scope,
@@ -361,6 +406,7 @@ def main():
     launch_obsidian(vault)
     api_key, data = wait_for_api_key(plugin_dir)
     url = choose_endpoint(data)
+    wait_for_server(url, api_key)
     default_name = "obsidian-" + vault.name.lower().replace(" ", "-")
     name = input(f"\nMCP server name [{default_name}]: ").strip() or default_name
     register_with_claude(url, api_key, name)
